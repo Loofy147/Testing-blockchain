@@ -1,29 +1,21 @@
 import hashlib
 import time
 import json
-from typing import List, Dict, Optional
-from dataclasses import dataclass
 import numpy as np
-from sklearn.linear_model import LinearRegression
+from typing import List, Dict, Tuple
+from dataclasses import dataclass
+from collections import deque
+import random
 
 
 @dataclass
 class Transaction:
-    """Structured transaction with validation"""
     sender: str
     recipient: str
     amount: float
-    fee: float = 0.0
-    timestamp: float = None
-    signature: Optional[str] = None
-
-    def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = time.time()
-        if self.amount <= 0:
-            raise ValueError("Transaction amount must be positive")
-        if self.fee < 0:
-            raise ValueError("Transaction fee cannot be negative")
+    fee: float
+    timestamp: float
+    priority_score: float = 0.0  # AI-assigned priority
 
     def to_dict(self):
         return {
@@ -31,13 +23,256 @@ class Transaction:
             "recipient": self.recipient,
             "amount": self.amount,
             "fee": self.fee,
-            "timestamp": self.timestamp
+            "timestamp": self.timestamp,
+            "priority_score": self.priority_score
         }
 
     def calculate_hash(self):
-        """Hash for transaction verification"""
-        tx_string = json.dumps(self.to_dict(), sort_keys=True)
-        return hashlib.sha256(tx_string.encode()).hexdigest()
+        return hashlib.sha256(json.dumps(self.to_dict(), sort_keys=True).encode()).hexdigest()
+
+
+class NetworkMetrics:
+    """Real-time network health monitoring"""
+
+    def __init__(self):
+        self.tx_history = deque(maxlen=100)
+        self.block_times = deque(maxlen=50)
+        self.fee_history = deque(maxlen=100)
+
+    def record_transaction(self, tx: Transaction):
+        self.tx_history.append({
+            'timestamp': tx.timestamp,
+            'fee': tx.fee,
+            'amount': tx.amount
+        })
+        self.fee_history.append(tx.fee)
+
+    def record_block(self, block_time: float):
+        self.block_times.append(block_time)
+
+    def get_congestion_score(self) -> float:
+        """0 = empty, 1 = maximum congestion"""
+        if len(self.tx_history) < 10:
+            return 0.0
+
+        recent_tx_rate = len(self.tx_history) / 100.0
+        return min(1.0, recent_tx_rate)
+
+    def get_velocity_trend(self) -> float:
+        """Positive = accelerating, Negative = decelerating, based on timestamps"""
+        if len(self.tx_history) < 20:
+            return 0.0
+
+        sorted_history = sorted(self.tx_history, key=lambda x: x['timestamp'])
+
+        recent_tx = sorted_history[-10:]
+        older_tx = sorted_history[-20:-10]
+
+        if not recent_tx or not older_tx:
+            return 0.0
+
+        recent_duration = recent_tx[-1]['timestamp'] - recent_tx[0]['timestamp']
+        older_duration = older_tx[-1]['timestamp'] - older_tx[0]['timestamp']
+
+        recent_rate = len(recent_tx) / max(recent_duration, 1.0)  # tx/sec
+        older_rate = len(older_tx) / max(older_duration, 1.0)    # tx/sec
+
+        return recent_rate - older_rate
+
+    def get_average_block_time(self) -> float:
+        if not self.block_times:
+            return 10.0
+        return np.mean(self.block_times)
+
+
+class IntelligentFeeMarket:
+    """
+    AI-driven dynamic fee market that learns optimal pricing
+    Uses multi-factor analysis instead of simple linear regression
+    """
+
+    def __init__(self):
+        # Market state
+        self.base_fee = 0.01
+        self.surge_multiplier = 1.0
+        self.learning_rate = 0.1
+
+        # Historical performance
+        self.fee_efficiency_history = deque(maxlen=50)
+        self.user_satisfaction_scores = deque(maxlen=50)
+
+    def calculate_dynamic_fee(self,
+                            pending_count: int,
+                            network_metrics: NetworkMetrics,
+                            user_urgency: float = 0.5) -> Dict:
+        """
+        Multi-factor fee calculation with explainability
+        """
+
+        # Factor 1: Network congestion (exponential, not linear)
+        congestion = network_metrics.get_congestion_score()
+        congestion_multiplier = np.exp(congestion * 2) / np.exp(2)  # 1.0 to ~2.7x
+
+        # Factor 2: Velocity trend (anticipatory pricing)
+        velocity = network_metrics.get_velocity_trend()
+        velocity_multiplier = 1.0 + (velocity * 0.5)  # Penalize acceleration
+
+        # Factor 3: Pending transaction pressure
+        pending_multiplier = 1.0 + (pending_count / 50.0)
+
+        # Factor 4: Block time efficiency
+        target_block_time = 10.0
+        actual_block_time = network_metrics.get_average_block_time()
+        time_multiplier = target_block_time / max(actual_block_time, 1.0)
+
+        # Combine factors with weights
+        total_multiplier = (
+            congestion_multiplier * 0.4 +
+            velocity_multiplier * 0.2 +
+            pending_multiplier * 0.3 +
+            time_multiplier * 0.1
+        )
+
+        # Apply user urgency preference
+        urgency_adjustment = 1.0 + (user_urgency - 0.5)  # 0.5x to 1.5x
+
+        # Calculate final fee
+        calculated_fee = self.base_fee * total_multiplier * urgency_adjustment
+
+        # Adaptive base fee adjustment (learn over time)
+        if len(self.fee_efficiency_history) > 10:
+            avg_efficiency = np.mean(self.fee_efficiency_history)
+            if avg_efficiency < 0.6:  # Too many failed transactions
+                self.base_fee *= (1 + self.learning_rate)
+            elif avg_efficiency > 0.9:  # Overpricing
+                self.base_fee *= (1 - self.learning_rate * 0.5)
+
+        return {
+            'recommended_fee': round(calculated_fee, 4),
+            'confidence': self._calculate_confidence(network_metrics),
+            'explanation': {
+                'congestion_factor': round(congestion_multiplier, 2),
+                'velocity_factor': round(velocity_multiplier, 2),
+                'pending_factor': round(pending_multiplier, 2),
+                'time_factor': round(time_multiplier, 2),
+                'urgency_adjustment': round(urgency_adjustment, 2)
+            },
+            'price_tiers': {
+                'economy': round(calculated_fee * 0.7, 4),
+                'standard': round(calculated_fee, 4),
+                'priority': round(calculated_fee * 1.5, 4),
+                'instant': round(calculated_fee * 3.0, 4)
+            }
+        }
+
+    def _calculate_confidence(self, metrics: NetworkMetrics) -> float:
+        """How confident is the AI in its prediction?"""
+        if len(metrics.fee_history) < 20:
+            return 0.5
+
+        # Lower confidence during high volatility
+        fee_std = np.std(metrics.fee_history)
+        fee_mean = np.mean(metrics.fee_history)
+        volatility = fee_std / max(fee_mean, 0.01)
+
+        confidence = max(0.3, 1.0 - volatility)
+        return round(confidence, 2)
+
+    def learn_from_outcome(self, tx: Transaction, was_included: bool, wait_time: float):
+        """Reinforcement learning from transaction outcomes"""
+
+        # Calculate efficiency score
+        efficiency = 1.0 if was_included else 0.0
+
+        # Penalize long wait times
+        if was_included and wait_time > 30:
+            efficiency *= (30 / wait_time)
+
+        self.fee_efficiency_history.append(efficiency)
+
+        # User satisfaction (inverse relationship with fee, direct with inclusion)
+        satisfaction = (1.0 if was_included else 0.0) - (tx.fee / 10.0)
+        self.user_satisfaction_scores.append(max(0, satisfaction))
+
+
+class IntelligentMempool:
+    """AI-powered transaction pool with smart ordering"""
+
+    def __init__(self, fee_market: IntelligentFeeMarket):
+        self.pending: List[Transaction] = []
+        self.fee_market = fee_market
+
+    def add_transaction(self, tx: Transaction) -> Dict:
+        """Add transaction with AI priority scoring"""
+
+        # Calculate priority score based on multiple factors
+        base_priority = tx.fee / max(tx.amount, 0.01)
+
+        # Time factor: older transactions get priority boost
+        age_seconds = time.time() - tx.timestamp
+        age_priority = min(1.0, age_seconds / 3600)  # Max boost after 1 hour
+
+        # Sender reputation (simplified - could be on-chain history)
+        sender_priority = 0.5  # Placeholder
+
+        tx.priority_score = (
+            base_priority * 0.5 +
+            age_priority * 0.3 +
+            sender_priority * 0.2
+        )
+
+        self.pending.append(tx)
+
+        return {
+            'position': self._estimate_position(tx),
+            'estimated_wait': self._estimate_wait_time(tx),
+            'priority_score': round(tx.priority_score, 3)
+        }
+
+    def _estimate_position(self, tx: Transaction) -> int:
+        """Where in the queue is this transaction?"""
+        higher_priority = sum(1 for t in self.pending if t.priority_score > tx.priority_score)
+        return higher_priority + 1
+
+    def _estimate_wait_time(self, tx: Transaction) -> float:
+        """Estimated seconds until inclusion"""
+        position = self._estimate_position(tx)
+        avg_block_time = 10.0
+        tx_per_block = 10
+
+        blocks_to_wait = position / tx_per_block
+        return blocks_to_wait * avg_block_time
+
+    def get_optimal_transactions(self, max_count: int = 10) -> List[Transaction]:
+        """AI-selected optimal transaction set for next block"""
+
+        # Sort by priority score (descending)
+        sorted_tx = sorted(self.pending, key=lambda t: t.priority_score, reverse=True)
+
+        # Optimize for: total fees, diversity, fairness
+        selected = []
+        total_fees = 0
+        sender_counts = {}
+
+        for tx in sorted_tx:
+            if len(selected) >= max_count:
+                break
+
+            # Prevent single sender dominance
+            sender_count = sender_counts.get(tx.sender, 0)
+            if sender_count >= 3:
+                continue
+
+            selected.append(tx)
+            total_fees += tx.fee
+            sender_counts[tx.sender] = sender_count + 1
+
+        return selected
+
+    def remove_transactions(self, transactions: List[Transaction]):
+        """Remove mined transactions from pool"""
+        tx_hashes = {tx.calculate_hash() for tx in transactions}
+        self.pending = [tx for tx in self.pending if tx.calculate_hash() not in tx_hashes]
 
 
 class Block:
@@ -49,14 +284,16 @@ class Block:
         self.nonce = 0
         self.hash = self.calculate_hash()
 
+        # AI metrics
+        self.total_fees = sum(tx.fee for tx in transactions)
+        self.avg_priority = np.mean([tx.priority_score for tx in transactions]) if transactions else 0
+
     def calculate_hash(self) -> str:
-        """Calculate block hash including all transactions"""
         tx_data = json.dumps([tx.to_dict() for tx in self.transactions], sort_keys=True)
         block_string = f"{self.index}{self.timestamp}{tx_data}{self.previous_hash}{self.nonce}"
         return hashlib.sha256(block_string.encode()).hexdigest()
 
     def mine_block(self, difficulty: int) -> int:
-        """Mine block and return number of attempts"""
         target = "0" * difficulty
         attempts = 0
 
@@ -65,72 +302,35 @@ class Block:
             self.hash = self.calculate_hash()
             attempts += 1
 
-            # Progress indicator for long mining
-            if attempts % 10000 == 0:
-                print(f"Mining... {attempts} attempts")
-
         return attempts
 
 
-class FeePredictor:
-    """Smart contract for dynamic fee prediction"""
+class IntelligentBlockchain:
+    """
+    Blockchain with AI-driven economic protocol
+    """
 
-    def __init__(self):
-        self.model = LinearRegression()
-        self.is_trained = False
-        self.min_fee = 0.01
-        self.max_fee = 10.0
-
-    def train_model(self, historical_data: List[tuple] = None):
-        """Train on historical [pending_tx_count, fee] data"""
-        if historical_data is None:
-            # Default training data: more pending transactions = higher fees
-            X = np.array([[5], [10], [20], [30], [50], [75], [100]]).reshape(-1, 1)
-            y = np.array([0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0])
-        else:
-            X = np.array([data[0] for data in historical_data]).reshape(-1, 1)
-            y = np.array([data[1] for data in historical_data])
-
-        self.model.fit(X, y)
-        self.is_trained = True
-
-    def predict_fee(self, pending_transactions_count: int) -> float:
-        """Predict optimal fee based on network congestion"""
-        if not self.is_trained:
-            self.train_model()
-
-        prediction = self.model.predict(np.array([[pending_transactions_count]]))[0]
-
-        # Clamp to reasonable bounds
-        return max(self.min_fee, min(self.max_fee, prediction))
-
-    def update_with_block(self, block: Block):
-        """Update model with new block data (online learning)"""
-        # Could implement incremental learning here
-        pass
-
-
-class Blockchain:
     def __init__(self, difficulty: int = 2):
-        self.chain: List[Block] = [self.create_genesis_block()]
+        self.chain: List[Block] = [self._create_genesis_block()]
         self.difficulty = difficulty
-        self.pending_transactions: List[Transaction] = []
         self.mining_reward = 100.0
-        self.fee_predictor = FeePredictor()
+
+        # AI components
+        self.metrics = NetworkMetrics()
+        self.fee_market = IntelligentFeeMarket()
+        self.mempool = IntelligentMempool(self.fee_market)
+
+        # State
         self.balances: Dict[str, float] = {}
+        self.transaction_outcomes: Dict[str, Dict] = {}
 
-        # Initialize fee predictor
-        self.fee_predictor.train_model()
-
-    def create_genesis_block(self) -> Block:
-        """Create the first block in the chain"""
+    def _create_genesis_block(self) -> Block:
         return Block(0, time.time(), [], "0")
 
     def get_latest_block(self) -> Block:
         return self.chain[-1]
 
     def get_balance(self, address: str) -> float:
-        """Calculate balance for an address"""
         if address in self.balances:
             return self.balances[address]
 
@@ -145,165 +345,190 @@ class Blockchain:
         self.balances[address] = balance
         return balance
 
-    def get_recommended_fee(self) -> float:
-        """Get AI-predicted fee based on current network state"""
-        pending_count = len(self.pending_transactions)
-        return self.fee_predictor.predict_fee(pending_count)
+    def get_fee_recommendation(self, urgency: float = 0.5) -> Dict:
+        """
+        Get AI-powered fee recommendation with full transparency
 
-    def add_transaction(self, sender: str, recipient: str, amount: float, fee: float = None) -> bool:
-        """Add validated transaction to pending pool"""
-
-        # Network reward transactions bypass validation
-        if sender == "network":
-            tx = Transaction(sender, recipient, amount, 0)
-            self.pending_transactions.append(tx)
-            return True
-
-        # Auto-calculate fee if not provided
-        if fee is None:
-            fee = self.get_recommended_fee()
-
-        # Validate sender has sufficient balance
-        sender_balance = self.get_balance(sender)
-        total_cost = amount + fee
-
-        if sender_balance < total_cost:
-            print(f"❌ Insufficient balance. Required: {total_cost}, Available: {sender_balance}")
-            return False
-
-        try:
-            tx = Transaction(sender, recipient, amount, fee)
-            self.pending_transactions.append(tx)
-            print(f"✅ Transaction added. Fee: {fee:.4f}")
-            return True
-        except ValueError as e:
-            print(f"❌ Invalid transaction: {e}")
-            return False
-
-    def mine_pending_transactions(self, mining_reward_address: str) -> Block:
-        """Mine pending transactions into a new block"""
-
-        if not self.pending_transactions:
-            print("⚠️  No transactions to mine")
-            return None
-
-        # Calculate total fees collected
-        total_fees = sum(tx.fee for tx in self.pending_transactions)
-
-        # Add mining reward + collected fees
-        reward_amount = self.mining_reward + total_fees
-        reward_tx = Transaction("network", mining_reward_address, reward_amount, 0)
-
-        # Create new block with all pending transactions + reward
-        transactions_to_mine = self.pending_transactions.copy()
-        transactions_to_mine.append(reward_tx)
-
-        new_block = Block(
-            len(self.chain),
-            time.time(),
-            transactions_to_mine,
-            self.get_latest_block().hash
+        urgency: 0.0 (no hurry) to 1.0 (maximum urgency)
+        """
+        return self.fee_market.calculate_dynamic_fee(
+            pending_count=len(self.mempool.pending),
+            network_metrics=self.metrics,
+            user_urgency=urgency
         )
 
-        print(f"⛏️  Mining block {new_block.index} with {len(transactions_to_mine)} transactions...")
+    def add_transaction(self, sender: str, recipient: str, amount: float,
+                       fee: float = None, urgency: float = 0.5) -> Dict:
+        """
+        Add transaction with intelligent fee suggestion
+        """
+
+        # Auto-calculate optimal fee if not provided
+        if fee is None:
+            fee_data = self.get_fee_recommendation(urgency)
+            fee = fee_data['recommended_fee']
+            print(f"💡 AI recommended fee: {fee:.4f} (confidence: {fee_data['confidence']})")
+            print(f"   Factors: {fee_data['explanation']}")
+
+        # Validate balance (skip for network rewards)
+        if sender != "network":
+            balance = self.get_balance(sender)
+            if balance < amount + fee:
+                return {
+                    'success': False,
+                    'error': f'Insufficient balance: {balance:.2f} < {amount + fee:.2f}'
+                }
+
+        # Create and add transaction
+        tx = Transaction(sender, recipient, amount, fee, time.time())
+        mempool_info = self.mempool.add_transaction(tx)
+        self.metrics.record_transaction(tx)
+
+        return {
+            'success': True,
+            'transaction': tx,
+            'mempool_info': mempool_info,
+            'fee_paid': fee
+        }
+
+    def mine_block(self, miner_address: str) -> Block:
+        """Mine next block with AI-optimized transaction selection"""
+
+        if not self.mempool.pending:
+            print("⚠️  No transactions in mempool")
+            return None
+
+        # AI selects optimal transaction set
+        selected_tx = self.mempool.get_optimal_transactions(max_count=10)
+
+        if not selected_tx:
+            print("⚠️  No eligible transactions")
+            return None
+
+        # Calculate miner reward
+        total_fees = sum(tx.fee for tx in selected_tx)
+        reward_tx = Transaction("network", miner_address, self.mining_reward + total_fees, 0, time.time())
+
+        # Create block
+        block_tx = selected_tx + [reward_tx]
+        new_block = Block(len(self.chain), time.time(), block_tx, self.get_latest_block().hash)
+
+        # Mine
+        print(f"⛏️  Mining block {new_block.index} with {len(selected_tx)} transactions...")
         start_time = time.time()
         attempts = new_block.mine_block(self.difficulty)
         mine_time = time.time() - start_time
 
         self.chain.append(new_block)
+        self.metrics.record_block(mine_time)
+
+        # Learn from outcomes
+        for tx in selected_tx:
+            self.fee_market.learn_from_outcome(tx, was_included=True, wait_time=mine_time)
+
+        # Update state after successful mining
+        self.mempool.remove_transactions(selected_tx)
 
         # Update balances cache
-        for tx in transactions_to_mine:
+        for tx in block_tx:
+            if tx.sender != "network":
+                if tx.sender in self.balances:
+                    self.balances[tx.sender] -= (tx.amount + tx.fee)
+                else:
+                    # This case should ideally not happen if balance is checked before adding tx
+                    self.balances[tx.sender] = self.get_balance(tx.sender)
+
             if tx.recipient in self.balances:
                 self.balances[tx.recipient] += tx.amount
-            if tx.sender in self.balances and tx.sender != "network":
-                self.balances[tx.sender] -= (tx.amount + tx.fee)
+            else:
+                self.balances[tx.recipient] = self.get_balance(tx.recipient)
 
-        # Clear pending transactions
-        self.pending_transactions = []
-
-        print(f"✅ Block mined! Hash: {new_block.hash[:16]}...")
-        print(f"   Attempts: {attempts}, Time: {mine_time:.2f}s, Reward: {reward_amount:.2f}")
+        print(f"✅ Block mined! Total fees: {total_fees:.4f}, Time: {mine_time:.2f}s")
+        print(f"   Average priority: {new_block.avg_priority:.3f}")
 
         return new_block
 
-    def is_chain_valid(self) -> bool:
-        """Validate entire blockchain integrity"""
-        for i in range(1, len(self.chain)):
-            current_block = self.chain[i]
-            previous_block = self.chain[i - 1]
-
-            # Verify block hash
-            if current_block.hash != current_block.calculate_hash():
-                print(f"❌ Invalid hash at block {i}")
-                return False
-
-            # Verify chain linkage
-            if current_block.previous_hash != previous_block.hash:
-                print(f"❌ Invalid previous hash at block {i}")
-                return False
-
-            # Verify proof of work
-            if not current_block.hash.startswith("0" * self.difficulty):
-                print(f"❌ Invalid proof of work at block {i}")
-                return False
-
-        return True
-
-    def print_chain(self):
-        """Display blockchain information"""
+    def print_ai_insights(self):
+        """Display AI learning and predictions"""
         print("\n" + "="*60)
-        print(f"BLOCKCHAIN (Difficulty: {self.difficulty})")
+        print("🧠 AI INSIGHTS")
         print("="*60)
 
-        for block in self.chain:
-            print(f"\nBlock #{block.index}")
-            print(f"  Timestamp: {time.ctime(block.timestamp)}")
-            print(f"  Hash: {block.hash}")
-            print(f"  Previous: {block.previous_hash}")
-            print(f"  Nonce: {block.nonce}")
-            print(f"  Transactions: {len(block.transactions)}")
+        print(f"\nMarket Learning:")
+        print(f"  Base Fee: {self.fee_market.base_fee:.4f}")
+        print(f"  Learning Rate: {self.fee_market.learning_rate}")
 
-            for tx in block.transactions:
-                print(f"    • {tx.sender} → {tx.recipient}: {tx.amount:.2f} (fee: {tx.fee:.4f})")
+        if self.fee_market.fee_efficiency_history:
+            avg_efficiency = np.mean(self.fee_market.fee_efficiency_history)
+            print(f"  Fee Efficiency: {avg_efficiency:.2%}")
 
-        print("\n" + "="*60)
+        if self.fee_market.user_satisfaction_scores:
+            avg_satisfaction = np.mean(self.fee_market.user_satisfaction_scores)
+            print(f"  User Satisfaction: {avg_satisfaction:.2%}")
+
+        print(f"\nNetwork State:")
+        print(f"  Congestion: {self.metrics.get_congestion_score():.2%}")
+        print(f"  Velocity Trend: {self.metrics.get_velocity_trend():+.3f}")
+        print(f"  Avg Block Time: {self.metrics.get_average_block_time():.2f}s")
+
+        print(f"\nMempool Status:")
+        print(f"  Pending Transactions: {len(self.mempool.pending)}")
+        if self.mempool.pending:
+            priorities = [tx.priority_score for tx in self.mempool.pending]
+            print(f"  Priority Range: {min(priorities):.3f} - {max(priorities):.3f}")
 
 
-# Demo usage
+# Demo: Intelligent Blockchain in Action
 if __name__ == "__main__":
-    print("🔗 Initializing Blockchain with AI Fee Prediction...\n")
+    print("🧠 Initializing Intelligent Blockchain...\n")
 
-    # Create blockchain
-    blockchain = Blockchain(difficulty=3)
+    blockchain = IntelligentBlockchain(difficulty=2)
 
-    # Initial mining to create some funds
-    print("Initial mining to create network funds...")
-    blockchain.mine_pending_transactions("Alice")
+    # Bootstrap with initial funds
+    blockchain.mine_block("Alice")
 
-    # Check recommended fee
-    print(f"\n💡 Recommended fee (0 pending): {blockchain.get_recommended_fee():.4f}")
+    print("\n" + "="*60)
+    print("SCENARIO: Network Under Variable Load")
+    print("="*60)
 
-    # Add transactions with auto-calculated fees
-    print("\n📝 Adding transactions...")
-    blockchain.add_transaction("Alice", "Bob", 50)
-    blockchain.add_transaction("Alice", "Charlie", 30)
+    # Simulate varying network conditions
+    scenarios = [
+        ("Low Load", 3, 0.3),
+        ("Medium Load", 7, 0.5),
+        ("High Load", 15, 0.8),
+        ("Peak Load", 25, 1.0)
+    ]
 
-    print(f"💡 Recommended fee (2 pending): {blockchain.get_recommended_fee():.4f}")
+    for scenario_name, tx_count, urgency in scenarios:
+        print(f"\n📊 {scenario_name}: Adding {tx_count} transactions (urgency={urgency})")
 
-    blockchain.add_transaction("Alice", "Dave", 10, fee=0.5)  # Custom fee
+        for i in range(tx_count):
+            result = blockchain.add_transaction(
+                "Alice",
+                random.choice(["Bob", "Charlie", "Dave", "Eve"]),
+                random.uniform(1, 10),
+                urgency=urgency
+            )
 
-    # Mine transactions
-    blockchain.mine_pending_transactions("Bob")
+            if result['success']:
+                info = result['mempool_info']
+                print(f"  ✓ TX queued - Position: {info['position']}, "
+                      f"Wait: ~{info['estimated_wait']:.1f}s, "
+                      f"Priority: {info['priority_score']:.3f}")
 
-    # Check balances
-    print("\n💰 Balances:")
-    for address in ["Alice", "Bob", "Charlie", "Dave"]:
-        balance = blockchain.get_balance(address)
-        print(f"   {address}: {balance:.2f}")
+        # Show current fee recommendation
+        rec = blockchain.get_fee_recommendation(urgency)
+        print(f"\n  💰 Current Fee Tiers:")
+        for tier, fee in rec['price_tiers'].items():
+            print(f"     {tier.title()}: {fee:.4f}")
 
-    # Validate chain
-    print(f"\n🔐 Blockchain valid: {blockchain.is_chain_valid()}")
+        # Mine block
+        time.sleep(0.1)  # Simulate time passage
+        blockchain.mine_block("Miner1")
 
-    # Display full chain
-    blockchain.print_chain()
+    # Show AI learning outcomes
+    blockchain.print_ai_insights()
+
+    print("\n" + "="*60)
+    print("🎯 Demonstration Complete")
+    print("="*60)
